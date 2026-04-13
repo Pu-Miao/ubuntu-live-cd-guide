@@ -7,8 +7,8 @@
 set -e
 
 # ---------- 可调整参数 ----------
-OUTPUT_DIR="${1:-/root/live-output}"
-ISO_NAME="custom-live-[1m$(date +%Y%m%d)[0m.iso"
+OUTPUT_DIR=""${1:-/root/live-output}""
+ISO_NAME="custom-live-$(date +%Y%m%d).iso"
 WORK_DIR="/tmp/live-iso-work"
 SQUASHFS_COMP="xz"          # 压缩算法: xz / gzip / lz4
 # --------------------------------
@@ -49,7 +49,7 @@ mkdir -p "$OUTPUT_DIR"
 info "[1/5] 重建 initrd（包含 live-boot 钩子）..."
 
 # 确认 live-boot 已安装
-if ! dpkg -l live-boot &>/dev/null | grep -q '^ii'; then
+if ! dpkg -l live-boot 2>/dev/null | grep -q '^ii'; then
     warn "live-boot 未安装，正在安装..."
     apt-get install -y live-boot live-boot-initramfs-tools
 fi
@@ -154,7 +154,7 @@ SQ_BYTES=$(stat -c%s "$SQUASHFS_OUT")
 
 if [[ "$SQ_BYTES" -le "$ISO9660_MAX" ]]; then
     # ── squashfs ≤ 4GB：使用原始 grub-mkrescue 方式 ──────
-    info "  squashfs < 4GB（${SQ_SIZE}），使用 grub-mkrescue 生成 ISO..."
+    info "  squashfs <= 4GB（${SQ_SIZE}），使用 grub-mkrescue 生成 ISO..."
 
     grub-mkrescue \
         --output="$ISO_PATH" \
@@ -182,8 +182,9 @@ else
         "boot/grub/grub.cfg=$WORK_DIR/iso/boot/grub/grub.cfg" 2>/dev/null || true
 
     # 创建 EFI FAT 镜像（用于 El Torito EFI 引导）
+    # 注意：使用 64MB 确保 FAT32 最低 cluster 数量要求（FAT32 需要 >=65525 簇）
     EFI_IMG="$WORK_DIR/iso/boot/grub/efi.img"
-    dd if=/dev/zero of="$EFI_IMG" bs=1M count=10 2>/dev/null
+    dd if=/dev/zero of="$EFI_IMG" bs=1M count=64 2>/dev/null
     mformat -i "$EFI_IMG" -F ::
     mmd -i "$EFI_IMG" ::/EFI ::/EFI/BOOT
     mcopy -i "$EFI_IMG" "$WORK_DIR/iso/EFI/BOOT/BOOTx64.EFI" ::/EFI/BOOT/
