@@ -8,7 +8,8 @@ set -e
 
 # ---------- 可调整参数 ----------
 OUTPUT_DIR="${1:-/root/live-output}"
-ISO_NAME="custom-live-[0;31m$(date +%Y%m%d)[0m.iso"
+ISO_NAME="custom-live-
+$(date +%Y%m%d).iso"
 WORK_DIR="/tmp/live-iso-work"
 SQUASHFS_COMP="xz"          # 压缩算法: xz / gzip / lz4
 # --------------------------------
@@ -170,27 +171,28 @@ else
     EFI_IMG="$WORK_DIR/iso/boot/grub/efi.img"
 
     # 生成 BIOS 启动的 core.img
-    # 使用绝对路径传入 grub.cfg，避免相对路径解析失败
+    # 只内嵌最小模块集，避免超出 BIOS MBR 嵌入区大小限制（0x78000 = 480KB）
+    # grub.cfg 会被打包进 core.img 的 memdisk，启动后 GRUB 再从 ISO 加载完整配置
     info "  生成 BIOS core.img..."
     mkdir -p "$(dirname "$BIOS_CORE")"
     grub-mkstandalone \
         --format=i386-pc \
         --output="$BIOS_CORE" \
-        --install-modules="linux normal iso9660 biosdisk memdisk search tar ls" \
-        --modules="linux normal iso9660 biosdisk search" \
+        --install-modules="biosdisk iso9660" \
+        --modules="biosdisk iso9660" \
         "boot/grub/grub.cfg=${GRUB_CFG}" \
         2>&1 | tee /tmp/grub-bios.log | tail -5
     [[ -s "$BIOS_CORE" ]] || error "BIOS core.img 生成失败，请查看 /tmp/grub-bios.log"
     info "  BIOS core.img 生成完成（$(du -sh "$BIOS_CORE" | cut -f1)）"
 
-    # 生成 UEFI EFI 镜像
+    # 生成 UEFI EFI 镜像，只内嵌最小模块集
     info "  生成 UEFI BOOTx64.EFI..."
     mkdir -p "$(dirname "$EFI_EXE")"
     grub-mkstandalone \
         --format=x86_64-efi \
         --output="$EFI_EXE" \
-        --install-modules="linux normal iso9660 memdisk search tar ls" \
-        --modules="linux normal iso9660 search" \
+        --install-modules="iso9660" \
+        --modules="iso9660" \
         "boot/grub/grub.cfg=${GRUB_CFG}" \
         2>&1 | tee /tmp/grub-efi.log | tail -5
     [[ -s "$EFI_EXE" ]] || error "UEFI BOOTx64.EFI 生成失败，请查看 /tmp/grub-efi.log"
@@ -242,7 +244,7 @@ echo -e "${GREEN} ISO 路径: ${ISO_PATH}${NC}"
 echo -e "${GREEN} ISO 大小: ${ISO_SIZE}${NC}"
 echo -e "${GREEN}================================================${NC}"
 echo ""
-echo "  写入 U 盘示例（替换 /dev/sdX）:"
+echo "  写入 U 盘示例（替换 /dev/sdX）:" 
 echo "    sudo dd if=\"${ISO_PATH}\" of=/dev/sdX bs=4M status=progress oflag=sync"
 echo ""
 echo "  或用 Ventoy / Rufus 直接加载该 ISO 文件。"
