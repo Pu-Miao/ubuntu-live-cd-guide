@@ -7,8 +7,8 @@
 set -e
 
 # ---------- 可调整参数 ----------
-OUTPUT_DIR=""${1:-/root/live-output}""
-ISO_NAME="custom-live-$(date +%Y%m%d).iso"
+OUTPUT_DIR="${1:-/root/live-output}"
+ISO_NAME="custom-live-[0;31m$(date +%Y%m%d)[0m.iso"
 WORK_DIR="/tmp/live-iso-work"
 SQUASHFS_COMP="xz"          # 压缩算法: xz / gzip / lz4
 # --------------------------------
@@ -32,7 +32,7 @@ if [[ ${#PKGS_NEEDED[@]} -gt 0 ]]; then
     apt-get install -y "${PKGS_NEEDED[@]}"
 fi
 
-for cmd in mksquashfs xorriso grub-mkrescue mformat update-initramfs; do
+for cmd in mksquashfs xorriso grub-mkstandalone mformat update-initramfs; do
     command -v "$cmd" &>/dev/null || error "缺少命令: $cmd，请先安装对应包"
 done
 
@@ -132,7 +132,8 @@ unsquashfs -stat "$SQUASHFS_OUT" 2>/dev/null | grep "Filesystem size" \
 # ── 4. 写入 GRUB 配置 ─────────────────────────────────────
 info "[3/5] 写入 GRUB 配置..."
 
-cat > "$WORK_DIR/iso/boot/grub/grub.cfg" << 'GRUBCFG'
+GRUB_CFG="$WORK_DIR/iso/boot/grub/grub.cfg"
+cat > "$GRUB_CFG" << 'GRUBCFG'
 set timeout=30
 set default=0
 
@@ -164,34 +165,50 @@ else
     # ── squashfs > 4GB：使用 xorriso -iso-level 3 方式 ───
     info "  squashfs > 4GB（${SQ_SIZE}），使用 xorriso -iso-level 3 生成 ISO（支持大文件）..."
 
+    BIOS_CORE="$WORK_DIR/iso/boot/grub/core.img"
+    EFI_EXE="$WORK_DIR/iso/EFI/BOOT/BOOTx64.EFI"
+    EFI_IMG="$WORK_DIR/iso/boot/grub/efi.img"
+
     # 生成 BIOS 启动的 core.img
+    # 使用绝对路径传入 grub.cfg，避免相对路径解析失败
+    info "  生成 BIOS core.img..."
+    mkdir -p "$(dirname "$BIOS_CORE")"
     grub-mkstandalone \
         --format=i386-pc \
-        --output="$WORK_DIR/iso/boot/grub/core.img" \
+        --output="$BIOS_CORE" \
         --install-modules="linux normal iso9660 biosdisk memdisk search tar ls" \
         --modules="linux normal iso9660 biosdisk search" \
-        "boot/grub/grub.cfg=$WORK_DIR/iso/boot/grub/grub.cfg" 2>/dev/null || true
+        "boot/grub/grub.cfg=${GRUB_CFG}" \
+        2>&1 | tee /tmp/grub-bios.log | tail -5
+    [[ -s "$BIOS_CORE" ]] || error "BIOS core.img 生成失败，请查看 /tmp/grub-bios.log"
+    info "  BIOS core.img 生成完成（$(du -sh "$BIOS_CORE" | cut -f1)）"
 
     # 生成 UEFI EFI 镜像
-    mkdir -p "$WORK_DIR/iso/EFI/BOOT"
+    info "  生成 UEFI BOOTx64.EFI..."
+    mkdir -p "$(dirname "$EFI_EXE")"
     grub-mkstandalone \
         --format=x86_64-efi \
-        --output="$WORK_DIR/iso/EFI/BOOT/BOOTx64.EFI" \
+        --output="$EFI_EXE" \
         --install-modules="linux normal iso9660 memdisk search tar ls" \
         --modules="linux normal iso9660 search" \
-        "boot/grub/grub.cfg=$WORK_DIR/iso/boot/grub/grub.cfg" 2>/dev/null || true
+        "boot/grub/grub.cfg=${GRUB_CFG}" \
+        2>&1 | tee /tmp/grub-efi.log | tail -5
+    [[ -s "$EFI_EXE" ]] || error "UEFI BOOTx64.EFI 生成失败，请查看 /tmp/grub-efi.log"
+    info "  UEFI BOOTx64.EFI 生成完成（$(du -sh "$EFI_EXE" | cut -f1)）"
 
     # 创建 EFI FAT 镜像（用于 El Torito EFI 引导）
-    # 注意：使用 64MB 确保 FAT32 最低 cluster 数量要求（FAT32 需要 >=65525 簇）
-    EFI_IMG="$WORK_DIR/iso/boot/grub/efi.img"
+    # 64MB 确保满足 FAT32 最低 65525 簇的要求（10MB 会报 "Too few clusters"）
+    info "  创建 EFI FAT 镜像（64MB）..."
     dd if=/dev/zero of="$EFI_IMG" bs=1M count=64 2>/dev/null
     mformat -i "$EFI_IMG" -F ::
     mmd -i "$EFI_IMG" ::/EFI ::/EFI/BOOT
-    mcopy -i "$EFI_IMG" "$WORK_DIR/iso/EFI/BOOT/BOOTx64.EFI" ::/EFI/BOOT/
+    mcopy -i "$EFI_IMG" "$EFI_EXE" ::/EFI/BOOT/
+    info "  EFI FAT 镜像创建完成"
 
     # 核心：用 xorriso 生成 ISO
     # -iso-level 3  ← 取消单文件 4 GB 限制
     # BIOS + UEFI 双引导
+    info "  调用 xorriso 封装 ISO..."
     xorriso -as mkisofs \
         -iso-level 3 \
         -full-iso9660-filenames \
