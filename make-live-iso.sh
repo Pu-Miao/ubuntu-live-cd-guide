@@ -8,7 +8,7 @@ set -e
 
 # ---------- 可调整参数 ----------
 OUTPUT_DIR="${1:-/root/live-output}"
-ISO_NAME="custom-live-$(date +%Y%m%d).iso"
+ISO_NAME="custom-live-[1m$(date +%Y%m%d)[0m.iso"
 WORK_DIR="/tmp/live-iso-work"
 SQUASHFS_COMP="xz"          # 压缩算法: xz / gzip / lz4
 # --------------------------------
@@ -73,7 +73,6 @@ info "  内核 & initrd 已复制到 iso/boot/"
 
 # ── 2. 创建系统 squashfs ───────────────────────────────────
 info "[2/5] 创建 squashfs（压缩算法: ${SQUASHFS_COMP}，可能耗时较长）..."
-
 SQUASHFS_OUT="$WORK_DIR/iso/live/filesystem.squashfs"
 
 # 排除清单：不打包临时/虚拟文件系统和本次生成物
@@ -137,18 +136,6 @@ cat > "$WORK_DIR/iso/boot/grub/grub.cfg" << 'GRUBCFG'
 set timeout=30
 set default=0
 
-# 默认项：文本模式，能看到完整启动日志，便于排查问题
-menuentry "Ubuntu Live (文本模式，推荐)" {
-    linux  /boot/vmlinuz boot=live components systemd.unit=multi-user.target
-    initrd /boot/initrd.img
-}
-
-# 图形模式（Plymouth splash），系统正常后再用此项
-menuentry "Ubuntu Live (图形模式)" {
-    linux  /boot/vmlinuz boot=live components quiet splash
-    initrd /boot/initrd.img
-}
-
 # 加载到内存后运行，速度更快（需要 ≥4GB RAM）
 menuentry "Ubuntu Live (toram，需 4GB+ 内存)" {
     linux  /boot/vmlinuz boot=live components toram
@@ -156,15 +143,76 @@ menuentry "Ubuntu Live (toram，需 4GB+ 内存)" {
 }
 GRUBCFG
 
-# ── 5. 用 grub-mkrescue / xorriso 生成 ISO ────────────────
+# ── 5. 根据 squashfs 大小选择 ISO 生成方式 ────────────────
 info "[4/5] 生成可引导 ISO..."
 
 ISO_PATH="${OUTPUT_DIR}/${ISO_NAME}"
 
-grub-mkrescue \
-    --output="$ISO_PATH" \
-    "$WORK_DIR/iso" \
-    2>&1 | tail -10
+# ISO 9660 单文件上限：4294967295 字节（2^32 - 1，即 4 GB）
+ISO9660_MAX=4294967295
+SQ_BYTES=$(stat -c%s "$SQUASHFS_OUT")
+
+if [[ "$SQ_BYTES" -le "$ISO9660_MAX" ]]; then
+    # ── squashfs ≤ 4GB：使用原始 grub-mkrescue 方式 ──────
+    info "  squashfs < 4GB（${SQ_SIZE}），使用 grub-mkrescue 生成 ISO..."
+
+    grub-mkrescue \
+        --output="$ISO_PATH" \
+        "$WORK_DIR/iso" \
+        2>&1 | tail -10
+else
+    # ── squashfs > 4GB：使用 xorriso -iso-level 3 方式 ───
+    info "  squashfs > 4GB（${SQ_SIZE}），使用 xorriso -iso-level 3 生成 ISO（支持大文件）..."
+
+    # 生成 BIOS 启动的 core.img
+    grub-mkstandalone \
+        --format=i386-pc \
+        --output="$WORK_DIR/iso/boot/grub/core.img" \
+        --install-modules="linux normal iso9660 biosdisk memdisk search tar ls" \
+        --modules="linux normal iso9660 biosdisk search" \
+        "boot/grub/grub.cfg=$WORK_DIR/iso/boot/grub/grub.cfg" 2>/dev/null || true
+
+    # 生成 UEFI EFI 镜像
+    mkdir -p "$WORK_DIR/iso/EFI/BOOT"
+    grub-mkstandalone \
+        --format=x86_64-efi \
+        --output="$WORK_DIR/iso/EFI/BOOT/BOOTx64.EFI" \
+        --install-modules="linux normal iso9660 memdisk search tar ls" \
+        --modules="linux normal iso9660 search" \
+        "boot/grub/grub.cfg=$WORK_DIR/iso/boot/grub/grub.cfg" 2>/dev/null || true
+
+    # 创建 EFI FAT 镜像（用于 El Torito EFI 引导）
+    EFI_IMG="$WORK_DIR/iso/boot/grub/efi.img"
+    dd if=/dev/zero of="$EFI_IMG" bs=1M count=10 2>/dev/null
+    mformat -i "$EFI_IMG" -F ::
+    mmd -i "$EFI_IMG" ::/EFI ::/EFI/BOOT
+    mcopy -i "$EFI_IMG" "$WORK_DIR/iso/EFI/BOOT/BOOTx64.EFI" ::/EFI/BOOT/
+
+    # 核心：用 xorriso 生成 ISO
+    # -iso-level 3  ← 取消单文件 4 GB 限制
+    # BIOS + UEFI 双引导
+    xorriso -as mkisofs \
+        -iso-level 3 \
+        -full-iso9660-filenames \
+        -R -J \
+        -b boot/grub/core.img \
+        -no-emul-boot \
+        -boot-load-size 4 \
+        -boot-info-table \
+        --grub2-boot-info \
+        --grub2-mbr /usr/lib/grub/i386-pc/boot_hybrid.img \
+        -partition_offset 16 \
+        --mbr-force-bootable \
+        -append_partition 2 28732ac11ff8d211ba4b00a0c93ec93b "$EFI_IMG" \
+        -appended_part_as_gpt \
+        -eltorito-alt-boot \
+        -e --interval:appended_partition_2:all:: \
+        -no-emul-boot \
+        -isohybrid-gpt-basdat \
+        -o "$ISO_PATH" \
+        "$WORK_DIR/iso" \
+        2>&1 | tail -15
+fi
 
 [[ -f "$ISO_PATH" ]] || error "ISO 生成失败"
 
